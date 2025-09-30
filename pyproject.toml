@@ -1,0 +1,19 @@
+[project]
+name = "prac"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12.11"
+dependencies = [
+    "flax>=0.12.0",
+    "jax[cuda13]>=0.7.2",
+    "matplotlib>=3.10.6",
+    "tiktoken>=0.11.0",
+    "wandb>=0.22.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.30.1",
+    "kaggle>=1.7.4.5",
+]
