@@ -637,26 +637,30 @@ class MultiHeadAttention(Module):
         self.cache_index = nnx.Cache(jnp.array(0, dtype=jnp.int32))
 
 
-def precompute_freqs_cis(dim, seq_len, theta: float = 10000.0, *, complex_dtype=jnp.complex64):
+def precompute_freqs_cis(
+    dim, seq_len, theta: float = 10000.0, *, complex_dtype=jnp.complex64
+):
     """Precompute complex rotary frequencies: [seq_len, dim//2]."""
     half = dim // 2
-    freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32)[:half] / jnp.float32(dim)))
+    freqs = 1.0 / (
+        theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32)[:half] / jnp.float32(dim))
+    )
     t = jnp.arange(seq_len, dtype=jnp.float32)
     ang = jnp.outer(t, freqs)  # [seq_len, half]
     freqs_cis = jnp.exp(1j * ang).astype(complex_dtype)  # complex64
     return freqs_cis
 
-def apply_rotary_emb(query, key, freqs_cis, offset: int = 0):
+
+def apply_rotary_emb(query, key, freqs_cis, seq_len, offset: int = 0):
     """Apply rotary embedding to q/k. Supports decode offset.
     query/key: [..., seq_len, n_heads, head_dim]
     """
-    print(f"[DEBUG] apply_rotary_emb offset={offset}, seq_len={seq_len}")
     head_dim = query.shape[-1]
     assert head_dim % 2 == 0, "RoPE requires head_dim to be even."
     seq_len = query.shape[-3]
 
-    freqs_cis = freqs_cis[offset: offset + seq_len]        # [seq_len, head_dim//2]
-    freqs_cis = freqs_cis[None, :, None, :]                # [1, seq_len, 1, half]
+    freqs_cis = freqs_cis[offset : offset + seq_len]  # [seq_len, head_dim//2]
+    freqs_cis = freqs_cis[None, :, None, :]  # [1, seq_len, 1, half]
 
     q_ = query.reshape(*query.shape[:-1], head_dim // 2, 2)
     k_ = key.reshape(*key.shape[:-1], head_dim // 2, 2)
@@ -667,7 +671,7 @@ def apply_rotary_emb(query, key, freqs_cis, offset: int = 0):
     k_rot = k_complex * freqs_cis
 
     def to_real(x):
-        x_r = jnp.stack([x.real, x.imag], axis=-1)         # [..., half, 2]
+        x_r = jnp.stack([x.real, x.imag], axis=-1)  # [..., half, 2]
         return x_r.reshape(*x_r.shape[:-2], head_dim)
 
     q_out = to_real(q_rot).reshape(*query.shape).astype(query.dtype)
@@ -688,6 +692,7 @@ class MultiHeadAttentionRoPE(MultiHeadAttention):
         super().__init__(*args, **kwargs)
         self.use_rope = use_rope
         self.rope_base = rope_base
+        self.max_seq_len = max_seq_len
         self.freqs_cis = precompute_freqs_cis(self.head_dim, max_seq_len, rope_base)
 
     def __call__(
@@ -776,7 +781,9 @@ class MultiHeadAttentionRoPE(MultiHeadAttention):
             # update key, value caches with our new 1d spatial slices
             cur_index = self.cache_index[...]
             if self.use_rope:
-                query, key = apply_rotary_emb(query, key, self.freqs_cis, offset=int(cur_index))
+                query, key = apply_rotary_emb(
+                    query, key, self.freqs_cis, self.max_seq_len, offset=int(cur_index)
+                )
             zero = jnp.array(0, dtype=lax.dtype(cur_index.dtype))
             indices = (zero,) * len(batch_dims) + (cur_index, zero, zero)
             key = lax.dynamic_update_slice(self.cached_key[...], key, indices)
@@ -797,8 +804,10 @@ class MultiHeadAttentionRoPE(MultiHeadAttention):
             )
         else:
             if self.use_rope:
-                query, key = apply_rotary_emb(query, key, self.freqs_cis, offset=0)
-        
+                query, key = apply_rotary_emb(
+                    query, key, self.freqs_cis, self.max_seq_len, offset=0
+                )
+
         if self.dropout_rate > 0.0:  # Require `deterministic` only if using dropout.
             deterministic = first_from(
                 deterministic,
